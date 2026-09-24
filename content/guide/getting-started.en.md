@@ -1,7 +1,7 @@
 ---
 title: Getting started
 description: "Directory layering, the single hand-written layer, and the steps behind one command."
-source_sha256: 93d52feb22f39b3419b128ce170bd52d02718196f943fe38354daf4c1f668b5b
+source_sha256: 0158174e176835e09dfc2f5c867b5b71c3f0e448e60e40f0950e5c29076c1c4c
 translated: 2026-01-01
 icon: lucide/rocket
 tags: ["build"]
@@ -32,12 +32,24 @@ manifest is needed. Hand-written `docs/**/*.md` carry no banner and are never pr
 ## What one command runs
 
 ```
-make build = docsgen → navgen → zensical build --strict → tagfilter → linkcheck → i18n_check
+make build = docsgen → navgen → zensical build --strict → linkcheck → chunker --check → i18n_check
 ```
 
 The last three are checks on the **build output**; source-level validation cannot see them:
 
-* `tagfilter` — the tag index is filtered per language (the plugin scans all of `docs/`,
-  so it would otherwise list pages of other languages);
 * `linkcheck` — internal references, directory trailing slashes, redirect stub targets;
+* `chunker --check` — whether the split parts of large archives match their manifest
+  (skipped outright when the site has no archives);
 * `i18n_check` — missing, stale, or structurally mismatched translations.
+
+The tag index is not part of that chain: `docsgen` writes one per (version, language),
+so **the preview matches production** — the tags plugin scans all of `docs/` and has no
+notion of language, so letting it expand the tag page would mix all three languages.
+
+Three more commands are deliberately outside `make build`:
+
+* `make serve` — local preview, from a generated config that differs only in `site_url`;
+* `make offline` — a whole site you can open straight from disk (large archives and the
+  404 page are dropped, addresses become `.html`, and `offline_check` re-verifies that
+  every internal reference resolves);
+* `make watch` — regenerate `docs/` whenever `content/` changes (used alongside `make serve`).

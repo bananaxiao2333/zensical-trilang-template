@@ -11,6 +11,16 @@ i18n-report.md
 # 现在判据是文件里那行生成横幅，两份记录会分叉、一份不会。
 .docsgen.json
 
+# make serve 现场产出的预览配置：只把 site_url 换成本地根域，一条命令即可再生。
+zensical.preview.toml
+
+# 离线文件版：`make offline` 一条命令即可再生，内容是构建产物，
+# 改一次内容就整体过期——不入库。生成物留在本地，随取随发。
+# 打包名的默认值是 `<仓库目录名>-offline.zip`（见 Makefile 的 OFFLINE_ZIP）。
+site-offline/
+*-offline.zip
+zensical.offline.toml
+
 # Python / uv
 .venv/
 __pycache__/
@@ -20,3 +30,7 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# 从原始素材（网页、表格、文档）抽取内容的暂存区：中间产物，抽完就落进
+# content/ 与 docs/assets/，这里不再留副本。用不上可以整段删掉。
+.staging/

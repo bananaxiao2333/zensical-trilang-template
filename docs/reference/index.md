@@ -5,6 +5,7 @@ icon: lucide/folder-tree
 description: 前置元数据的全部字段，以及模版提供的命令与体检。
 nav: ["front-matter", "commands"]
 # ⚠️ 由 tools/docsgen.py 从 content/reference/index.zh-hans.md 生成，请勿手改；要改请改 content/ 下的源文件。
+hide: [toc]
 ---
 
 # 参考

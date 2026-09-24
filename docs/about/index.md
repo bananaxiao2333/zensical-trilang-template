@@ -4,6 +4,7 @@ title: 关于这个模版
 icon: lucide/info
 description: 模版包含什么、不包含什么，以及它的取舍。
 # ⚠️ 由 tools/docsgen.py 从 content/about/index.zh-hans.md 生成，请勿手改；要改请改 content/ 下的源文件。
+hide: [navigation]
 ---
 
 # 关于这个模版

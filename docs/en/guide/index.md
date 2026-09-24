@@ -7,6 +7,7 @@ nav_label: "Guide"
 icon: lucide/compass
 nav: ["getting-started", "writing", "translating"]
 # ⚠️ 由 tools/docsgen.py 从 content/guide/index.en.md 生成，请勿手改；要改请改 content/ 下的源文件。
+hide: [toc]
 ---
 
 # Guide

@@ -43,11 +43,11 @@ jobs:
       - name: Build site
         run: uv run zensical build --clean --strict
 
-      - name: Filter tag index per language
-        run: uv run python tools/tagfilter.py
-
       - name: Check built links
         run: uv run python tools/linkcheck.py
+
+      - name: Check version archives
+        run: uv run python tools/chunker.py --check
 
       - name: Check translation coverage
         run: uv run python tools/i18n_check.py --quiet
