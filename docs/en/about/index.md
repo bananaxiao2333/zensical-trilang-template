@@ -6,6 +6,7 @@ translated: 2026-01-01
 nav_label: "About"
 icon: lucide/info
 # ⚠️ 由 tools/docsgen.py 从 content/about/index.en.md 生成，请勿手改；要改请改 content/ 下的源文件。
+hide: [navigation]
 ---
 
 # About this template

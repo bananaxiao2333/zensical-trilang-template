@@ -29,11 +29,22 @@ docs/      构建层。.md 全部由 tools/docsgen.py 产出
 ## 一条命令跑什么
 
 ```
-make build = docsgen → navgen → zensical build --strict → tagfilter → linkcheck → i18n_check
+make build = docsgen → navgen → zensical build --strict → linkcheck → chunker --check → i18n_check
 ```
 
-后面三步都是在**构建产物上**做体检，源的校验看不到它们：
+后三步都是在**构建产物上**做体检，源的校验看不到它们：
 
-* `tagfilter` —— 标签索引分语种（插件按整个 `docs/` 扫描，会把别种语言的篇目也列进来）；
 * `linkcheck` —— 站内引用、目录尾斜杠、跳转桩目标是否都落地；
+* `chunker --check` —— 大文件归档的分片与清单对不对得上（没有归档就直接跳过）；
 * `i18n_check` —— 译文有没有漏、有没有过期、结构对不对得上。
+
+标签索引不在这条链上：它由 `docsgen` 按（版本，语言）各自生成一份，
+所以**预览与线上一致**（tags 插件按整个 `docs/` 扫描，没有语言概念，
+用它展开出来的标签页会把三种语言的篇目混在一起）。
+
+另有三条不在 `make build` 里的命令：
+
+* `make serve` —— 本地预览，另起一份只把 `site_url` 换成本地根域的配置；
+* `make offline` —— 出一份解压就能看的整站（去掉大文件与 404 页，地址改成 `.html` 式，
+  再跑一遍 `offline_check` 确认每条站内引用都落地）；
+* `make watch` —— 盯着 `content/`，改了自动重新生成（配合 `make serve` 用）。

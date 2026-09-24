@@ -3,8 +3,9 @@
 
 分层
 ----
-    content/     唯一手写层。文件名带语言后缀：guide/index.zh-hans.md、guide/index.en.md
-    docs/        构建层。.md 由本脚本产出；assets/、stylesheets/、*.html 仍是手写的
+    content/            唯一手写层。当前版内容，文件名带语言后缀
+    content/versions/   非当前版的冻结树，每个版本一个子目录
+    docs/               构建层。.md 与跳转桩由本脚本产出；assets/、stylesheets/ 仍是手写的
 
 同名不同语言后缀的文件是**同一篇**的不同语种：
 
@@ -13,27 +14,39 @@
 
 产物路径
 --------
-    默认语言 zh-hans  →  docs/<名字>.md
-    其它语言 en       →  docs/en/<名字>.md
-    其它语言 zh-hant  →  docs/zh-hant/<名字>.md
+两个正交的维度，**版本在前、语言在后**：
 
-于是简中在 /guide/，英文在 /en/guide/，繁中在 /zh-hant/guide/。
-默认语言是哪一个，只在 tools/langs.py 的 DEFAULT_LANG 里改。
+    默认语言 zh-hans、当前版       →  docs/<名字>.md
+    其它语言 en、当前版            →  docs/en/<名字>.md
+    默认语言 zh-hans、v1 版      →  docs/v1/<名字>.md
+    其它语言 en、v1 版           →  docs/v1/en/<名字>.md
+
+于是当前版简中在 /guide/，它的英文在 /en/guide/；v1 版简中在 /v1/guide/，
+它的英文在 /v1/en/guide/。语言的种类只在 tools/langs.py，版本清单只在
+zensical.toml 的 [[project.extra.version]]（见 tools/versions.py）。
 
 语言代码用**文字**标签（zh-hans / zh-hant），不用 zh-CN / zh-TW 这类**地区**标签：
 地区标签会把用词一起改掉（激光→雷射、链接→連結），那是替读者选边。
 
 派生语言
 --------
-繁体不是翻译，是简体的**脚本转换**，因此不单独手写，由本脚本从
-`content/**/*.zh-hans.md` 派生（见 tools/hant.py）。派生意味着不可能出现
-「简体改了、繁体没跟上」。派生关系定义在 tools/langs.py 的 DERIVATIONS。
+繁体不是翻译，是简体的**脚本转换**，因此不单独手写，由本脚本从各版本的
+`*.zh-hans.md` 派生（见 tools/hant.py）。派生意味着不可能出现「简体改了、
+繁体没跟上」。派生关系定义在 tools/langs.py 的 DERIVATIONS。
+
+跳转桩
+------
+非当前版是**冻结的快照**，所以它的页面集合可能与当前版对不上：当前版新加的分区，
+旧版自然没有。而版本切换器出现在每一页上，从当前版的这一页切到 v1 版时，
+v1 版里未必有对应页。缺的那些页在这里补一个跳转桩（`<meta http-equiv="refresh">`），
+落到该版本该语言的首页——而不是把读者送进 404。桩是**生成物**，带同样的横幅，
+`tools/linkcheck.py` 会把它的 refresh 目标当成一条必须落地的引用去验。
 
 共享资产
 --------
-`docs/assets/` 只有一份，三种语言共用。content/ 里的相对链接按**内容根**解析，
-落点在 assets/ 之下的就是共享资产；非默认语言的产物深一层，因此这些链接要多补
-一个 `../`。其余链接指向镜像页面，保持原样即可。
+`docs/assets/` 只有一份，全部版本与语言共用。content/ 里的相对链接按**内容根**
+解析，落点在 assets/ 之下的就是共享资产；产物每深一层，这些链接就多补一个 `../`，
+层数由 depth_of() 算（非当前版一层 + 非默认语言一层）。其余链接指向镜像页面，保持原样。
 
     uv run python tools/docsgen.py
     uv run python tools/docsgen.py --check     # 只比对，不写盘
@@ -42,14 +55,17 @@
 from __future__ import annotations
 
 import argparse
+import html
 import posixpath
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from hant import to_hant
-from langs import CONTENT, DEFAULT_LANG, DERIVATIONS, LANG_RE, ROOT
+from langs import CONTENT, DEFAULT_LANG, DERIVATIONS, LANG_RE, ROOT, other_languages
+from versions import ARCHIVE, Version, all_versions, audit, source_root, url_prefix
 
 DOCS = ROOT / "docs"
 
@@ -64,16 +80,115 @@ DERIVATIONS = [(dst, src, DERIVED_CONVERTERS[dst]) for dst, src in DERIVATIONS.i
 #: 内容根下这些前缀指向共享资产，而不是镜像页面。
 SHARED_PREFIXES = ("assets/",)
 
+#: 标签索引的占位符。主题的 tags 插件会把它展开成整站所有标签——**整站**，
+#: 也就是三种语言的标签一起列。那种页面在语言轴上没有意义：简体页上列着
+#: 英文和繁体的标签，点进去还是别的语言。所以这里不用插件的展开，
+#: 由本脚本按（版本，语言）各自生成一份，见 tag_index()。
+#: 插件仍然开着：页面标题下的标签、搜索索引里的 tags 字段都靠它。
+TAG_MARKER = "<!-- material/tags -->"
+
 BANNER_FMT = "# ⚠️ 由 tools/docsgen.py 从 {source} 生成，请勿手改；要改请改 content/ 下的源文件。"
 DERIVED_BANNER = "（本页由 {source_lang} 版脚本转换而来，不是另译）"
 
 #: 「这一份是生成物」的判据。横幅插在前置元数据里（`#` 是 YAML 注释，不会渲染成
 #: 正文），它本来就写着「这是生成的、别手改」——身份与出处是同一件事。
 #: 因此不再另存一份清单（原先的 .docsgen.json）来记录哪些文件是生成的：
-#: 两份记录会分叉，一份不会。与 tools/i18n_check.py 的 BANNER_RE 同一前缀。
+#: 两份记录会分叉，一份不会。跳转桩是 HTML，横幅形式不同，另立一条。
+#: 两条都与 tools/i18n_check.py 的 BANNER_RE 同一前缀。
 OWNED_RE = re.compile(r"^# ⚠️ 由 tools/docsgen\.py ", re.M)
+STUB_OWNED_RE = re.compile(r"<!-- ⚠️ 由 tools/docsgen\.py ", re.M)
 
 _LINK = re.compile(r'(\]\(|(?:\bsrc|\bhref)=")(?P<target>[^")\s]+)')
+
+
+# ── 标签 ──────────────────────────────────────────────────────────────────
+
+def front_matter_of(text: str) -> str:
+    """取前置元数据那一段（不含两头的 `---`）；没有就返回空串。"""
+    if not has_front_matter(text):
+        return ""
+    end = text.find("\n---", 3)
+    return text[3:end] if end > 0 else ""
+
+
+def front_matter_value(fm: str, key: str) -> str:
+    """取一个标量字段的值，去掉包裹的引号。"""
+    match = re.search(rf"(?m)^{re.escape(key)}:\s*(.+?)\s*$", fm)
+    return match.group(1).strip().strip("\"'") if match else ""
+
+
+def front_matter_tags(fm: str) -> list[str]:
+    """取 `tags: [a, b]`。只认这一种写法——本站的标签都这么写。"""
+    match = re.search(r"(?m)^tags:\s*\[(.*?)\]\s*$", fm)
+    if not match:
+        return []
+    return [tag.strip().strip("\"'") for tag in match.group(1).split(",") if tag.strip()]
+
+
+def tag_slug(name: str) -> str:
+    """标签的锚点名，与主题给页面标签生成的锚点必须**逐字符**一致。
+
+    ⚠️ 对不上就是全站标签链接落空。判据取 pymdownx 的 Unicode 版 slugify
+    （与 zensical.toml 的 toc.slugify 同一个函数、同一个 case），
+    中文标签原样保留，英文转小写、空格变连字符。
+    取不到 pymdownx 时退回同规则的手写实现，绝不会静默产出别的形状。
+    """
+    try:
+        from pymdownx.slugs import slugify
+        return slugify(name, case="lower")
+    except Exception:                                   # pragma: no cover
+        return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "-", name.lower()).strip("-")
+
+
+def tag_index(entries: list["Source"]) -> dict[tuple[str, str], str]:
+    """(版本 id, 语言) → 该份标签页的正文。
+
+    只收**同一种语言、同一个版本**的篇目：标签页是给这一种语言的读者看的。
+    """
+    grouped: dict[tuple[str, str], dict[str, list[tuple[str, str]]]] = {}
+    for source in entries:
+        text = source.path.read_text(encoding="utf-8")
+        fm = front_matter_of(text)
+        tags = front_matter_tags(fm)
+        if not tags:
+            continue
+        title = (front_matter_value(fm, "title")
+                 or front_matter_value(fm, "nav_label")
+                 or source.name.rsplit("/", 1)[-1])
+        link = f"../{source.name}.md"
+        bucket = grouped.setdefault((source.version.id, source.lang), {})
+        for tag in tags:
+            bucket.setdefault(tag, []).append((title, link))
+
+    out: dict[tuple[str, str], str] = {}
+    for key, bucket in grouped.items():
+        lines: list[str] = []
+        # 顺序按**锚点**排（与主题的标签索引同一顺位）。
+        for tag in sorted(bucket, key=tag_slug):
+            slug = tag_slug(tag)
+            lines.append(f'## <span class="md-tag">{tag}</span> {{ #tag:{slug} }}')
+            lines.append("")
+            for title, link in bucket[tag]:
+                lines.append(f"- [{title}]({link})")
+            lines.append("")
+        out[key] = "\n".join(lines).rstrip() + "\n"
+    return out
+
+
+# ── 源 ────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Source:
+    """一篇手写内容：它属于哪个版本、哪种语言、叫什么名字。"""
+
+    path: Path
+    name: str
+    lang: str
+    version: Version
+
+    @property
+    def content_root(self) -> Path:
+        return source_root(self.version)
 
 
 # ── 路径 ──────────────────────────────────────────────────────────────────
@@ -84,9 +199,14 @@ def split_lang(stem: str) -> tuple[str, str] | None:
     return (match["name"], match["lang"]) if match else None
 
 
-def depth_of(lang: str) -> int:
-    """产物相对 docs/ 下沉几层。默认语言 0，其余 1。"""
-    return 0 if lang == DEFAULT_LANG else 1
+def lang_prefix(lang: str) -> str:
+    """产物里该语言占的那一层（带尾斜杠，默认语言为空串）。"""
+    return "" if lang == DEFAULT_LANG else f"{lang}/"
+
+
+def depth_of(version: Version, lang: str) -> int:
+    """产物相对 docs/ 下沉几层：非当前版一层 + 非默认语言一层。"""
+    return (0 if version.current else 1) + (0 if lang == DEFAULT_LANG else 1)
 
 
 def is_shared(target: str, base: str) -> bool:
@@ -101,7 +221,7 @@ def is_shared(target: str, base: str) -> bool:
 
 
 def rewrite_shared(body: str, base: str, depth: int) -> str:
-    """非默认语言多下沉一层，共享资产的相对链接要多补 depth 个 `../`。"""
+    """产物每深一层，共享资产的相对链接就多补一个 `../`。"""
     if depth == 0:
         return body
 
@@ -116,55 +236,313 @@ def rewrite_shared(body: str, base: str, depth: int) -> str:
 
 # ── 生成 ──────────────────────────────────────────────────────────────────
 
-def sources() -> list[tuple[Path, str, str]]:
-    """(源文件, 名字, 语言)，按路径排序。名字是相对 content/ 的路径，含子目录。"""
-    found = []
-    for path in sorted(CONTENT.rglob("*.md")):
-        rel = path.relative_to(CONTENT)
-        parts = split_lang(rel.stem)
-        if not parts:
-            print(f"warn: {path.relative_to(ROOT)} 没有语言后缀，已跳过", file=sys.stderr)
+def sources() -> list[Source]:
+    """全部手写内容，按（版本，路径）排序。
+
+    当前版的根是 content/ 本身，所以要显式跳过 content/versions/——
+    那是非当前版的地盘，不然非当前版会被当成当前版的 `versions/` 分区重复生成一遍。
+    """
+    found: list[Source] = []
+    for version in all_versions():
+        root = source_root(version)
+        if not root.is_dir():
+            # 声明了却没有目录，由 versions.audit() 报错；这里安静跳过，
+            # 免得在体检之前先抛一个 FileNotFoundError，把真正的原因盖掉。
             continue
-        stem, lang = parts
-        found.append((path, (rel.parent / stem).as_posix(), lang))
+        for path in sorted(root.rglob("*.md")):
+            if version.current and ARCHIVE in path.parents:
+                continue
+            rel = path.relative_to(root)
+            parts = split_lang(rel.stem)
+            if not parts:
+                print(f"warn: {path.relative_to(ROOT)} 没有语言后缀，已跳过", file=sys.stderr)
+                continue
+            stem, lang = parts
+            found.append(Source(path, (rel.parent / stem).as_posix(), lang, version))
     return found
+
+
+def has_front_matter(text: str) -> bool:
+    """文件是不是以 YAML 前置元数据开头。
+
+    ⚠️ 判据是**第一个字符**就是 `---`。文件开头多一个空行——写内容时手滑、
+    或者用脚本生成时字符串带了个前导换行——前置元数据就整块不算数了：
+    `nav_label` / `icon` / `description` 静默失效，页面标题退回头一个 h1，
+    构建一声不吭。这一处踩过：`content/guide/index.zh-hans.md` 因此丢了
+    导航名与图标，也丢了下一条的 `hide:`（见 insert_hide）。
+    """
+    return text.startswith("---")
 
 
 def insert_banner(text: str, source: Path, note: str = "") -> str:
     banner = BANNER_FMT.format(source=source.relative_to(ROOT).as_posix()) + note
-    if text.startswith("---"):
+    if has_front_matter(text):
         end = text.find("\n---", 3)
         if end == -1:
             raise SystemExit(f"{source}: 前置元数据没有闭合")
         return f"{text[: end + 1]}{banner}\n{text[end + 1:]}"
+    if text[:1] in ("\n", "\r") or text.startswith("\ufeff"):
+        # 只差一个空行/字节序标记：这几乎必然是意外，直接说清楚
+        print(f"warn: {source.relative_to(ROOT)} 开头有空行或 BOM，"
+              f"前置元数据不算数（nav_label / icon / description 都会失效）",
+              file=sys.stderr)
     return f"<!-- {banner.lstrip('# ')} -->\n\n{text}"
 
 
-def render(source: Path, lang: str, *, depth: int, convert: Callable[[str], str] | None = None,
-           note: str = "") -> str:
-    text = source.read_text(encoding="utf-8")
-    base = source.parent.relative_to(CONTENT).as_posix()
+def render(source: Source, *, out_lang: str | None = None,
+           convert: Callable[[str], str] | None = None, note: str = "",
+           tags: str = "") -> str:
+    """把一篇手写内容渲染成产物。
+
+    `out_lang` 是**产物**这一份的语言，不是源文件的语言。两者只在派生语种上不同
+    （源是 zh-hans，产物是 zh-hant），但正是这一处不同决定了共享资产的相对链接
+    要补几个 `../`：补错了不会报错，只会让繁体页上的每一张图 404。
+    原先这里按 source.lang 算，靠模版自带的示例内容从没引用过 assets/ 才没暴露。
+    """
+    lang = out_lang or source.lang
+    text = source.path.read_text(encoding="utf-8")
+    base = source.path.parent.relative_to(source.content_root).as_posix()
     base = "" if base == "." else base
-    text = insert_banner(text, source, note)
-    text = rewrite_shared(text, base, depth)
+    text = insert_banner(text, source.path, note)
+    text = apply_tags(text, tags)
+    text = rewrite_shared(text, base, depth_of(source.version, lang))
     return convert(text) if convert else text
 
 
-def output_of(name: str, lang: str) -> Path:
-    prefix = DOCS if lang == DEFAULT_LANG else DOCS / lang
-    return prefix / f"{name}.md"
+def apply_tags(text: str, tags: str) -> str:
+    """把标签占位符换成生成好的那一份。
 
+    单独成一个函数是为了让 tools/i18n_check.py 复核派生语种时能走**同一条**流水线：
+    它要重算一遍产物，判据分两处写迟早会分叉，而分叉的表现是构建红着、
+    却看不出谁对（这条理由在 hide_sides 那里也写过一次）。
+    """
+    if tags and TAG_MARKER in text:
+        return text.replace(TAG_MARKER, tags.rstrip())
+    return text
+
+
+def output_of(name: str, lang: str, version: Version) -> Path:
+    return DOCS / url_prefix(version) / lang_prefix(lang) / f"{name}.md"
+
+
+def stub_of(name: str, lang: str, version: Version) -> Path:
+    """跳转桩的落点：**页面的**那个地址，不是「名字 + .html」。
+
+    真页 `docs/a/b.md` 的网址是 `/a/b/`、产物是 `site/a/b/index.html`，
+    所以桩要落在 `docs/<前缀>/a/b/index.html`——写成 `docs/<前缀>/a/b.html`
+    的话，切换器给出的 `/a/b/` 就落不到它身上，等于没补。
+
+    末段是 `index` 的名字是例外：`docs/a/index.md` 的网址是 `/a/`、
+    产物是 `site/a/index.html`，桩也就落在同名位置。
+    """
+    base = DOCS / url_prefix(version) / lang_prefix(lang)
+    tail = name if name == "index" or name.endswith("/index") else f"{name}/index"
+    return base / f"{tail}.html"
+
+
+def stub_target(name: str, lang: str, version: Version, has_home: bool) -> str:
+    """桩 → 该版本该语言首页，写成**相对**地址。
+
+    不用根相对（`/v1/en/`）：站点可能挂在子路径下（GitHub Pages 的项目站就是
+    `/<repo>/`），根相对会把读者送到域名根去。相对地址与站点挂在哪儿无关，
+    tools/linkcheck.py 也照常逐条验它落地。
+
+    退几层由桩自己的落点算出来，不靠数名字里的斜杠：`index` 那一层特殊，
+    数斜杠会少退一层。
+
+    `has_home=False` 时该（版本 × 语言）树下**没有自己的首页**——例如某个非当前版
+    只写了简体。这时再退回一层，落到该版本的**默认语言**首页：宁可把读者送到
+    看得懂的上一站，也不要停在一个不存在的地址上。
+    """
+    base = DOCS / url_prefix(version) / lang_prefix(lang)
+    depth = len(stub_of(name, lang, version).relative_to(base).parts) - 1
+    if not has_home:
+        depth += 1
+    return "../" * depth or "./"
+
+
+def render_stub(name: str, lang: str, version: Version, source_rel: str, has_home: bool) -> str:
+    """缺页的跳转桩：说明这一页没有该版本，并把读者送到该版本的首页。
+
+    用 refresh 而不是「带本站样式的说明页」，是因为桩必须**进不了导航**：
+    它占着 `guide/index.md` 这种会建分区的位置，写成页面就会被 navgen 当成
+    一个真的分区。HTML 桩不参与页面树，navgen 与 awesome-nav 都看不见它。
+    """
+    target = stub_target(name, lang, version, has_home)
+    title = html.escape(f"{version.label} · 本页无此版本", quote=True)
+    where = "该版本的首页" if has_home else "该版本的默认语言首页"
+    note = (f"这一页在「{version.label}」的这一种语言里没有对应内容。"
+            f"正在前往{where}；若没有自动跳转，请点下面的链接。")
+    return (
+        "<!DOCTYPE html>\n"
+        f"<!-- ⚠️ 由 tools/docsgen.py 生成，请勿手改；"
+        f"它补的是「{source_rel}」在「{version.label}」里缺的那一页。 -->\n"
+        f'<html lang="{html.escape(lang, quote=True)}">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        f'<meta http-equiv="refresh" content="0; url={target}">\n'
+        f'<link rel="canonical" href="{target}">\n'
+        f"<title>{title}</title>\n"
+        "</head>\n"
+        "<body>\n"
+        f"<p>{html.escape(note)}</p>\n"
+        f'<p><a href="{target}">{html.escape(version.label)} · 首页</a></p>\n'
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+# ── 空侧栏 ────────────────────────────────────────────────────────────────
+
+HIDE_NAV = "hide: [navigation]"
+HIDE_TOC = "hide: [toc]"
+
+
+def inert_sidebar(name: str, names: set[str]) -> bool:
+    """这一页的左栏会不会是**空的**。
+
+    左栏铺的是「当前顶层分区的其它页」。所以有两种页的左栏必然是空的：
+
+    * 顶层页（首页，或任何直接躺在树根上的单篇）——它们没有分区；
+    * **单页分区**的首页——这个分区里除它自己再没有第二篇。
+
+    空着也是空着：左栏会实打实占掉 242px，正文被挤成 688px。
+    拦掉它，正文自会铺到三分之二宽（见 partials/route.html 同款的推导思路）。
+
+    判据放在构建层而不是各页的前置元数据里：分区里加一篇新页时，
+    左栏该自己回来——写死在前置元数据里就不会，而且每加一种语言、
+    每个非当前版都要各写一遍。作者自己在前置元数据里写了 `hide:` 的，
+    这里不覆盖（见 insert_hide）。
+    """
+    section, sep, _ = name.partition("/")
+    if not sep:
+        # 顶层页：它自己就是一颗标签，左栏没有东西可铺
+        return True
+    head = f"{section}/"
+    return not any(n.startswith(head) and n != f"{head}index" for n in names)
+
+
+def tree_names() -> dict[tuple[str, str], set[str]]:
+    """每棵树（版本 × 语言）里有哪几页。
+
+    「这一页的左栏会不会是空的」要按**同一棵树**里还有没有别的页来判，
+    所以这份集合是那条判据的输入。tools/i18n_check.py 复核派生语种时
+    要重跑同一条流水线，也用它——判据必须只有一处，否则两边会分叉，
+    而分叉的表现是构建红着、却看不出谁对。
+    """
+    derived_of: dict[str, set[str]] = {}
+    for dst_lang, src_lang, _ in DERIVATIONS:
+        derived_of.setdefault(src_lang, set()).add(dst_lang)
+    found: dict[tuple[str, str], set[str]] = {}
+    for source in sources():
+        for lang in {source.lang} | derived_of.get(source.lang, set()):
+            found.setdefault((source.version.id, lang), set()).add(source.name)
+    return found
+
+
+#: 一行放在**代码围栏之外**的 h2~h6。
+#: 只认 `#`，不认裸 HTML 的 `<h2>`：本站的标题一律是 Markdown 写法，真写了
+#: 裸 HTML 标题的页面，作者自己加 `hide: [toc]` 即可（这里不覆盖作者写的 hide）。
+_SECTION_RE = re.compile(r"^#{2,6}[ \t]+\S", re.M)
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
+def body_without_fences(text: str) -> str:
+    """去掉前置元数据与代码围栏，只留正文行。
+
+    围栏里的 `## 这是注释` 不是标题，得排掉；否则一篇通篇代码的页面会被判成
+    「有小标题」，右栏又空着占回去。前置元数据里的 `#` 是 YAML 注释，同理。
+    """
+    if has_front_matter(text):
+        end = text.find("\n---", 3)
+        text = text[end + 4:] if end != -1 else text
+    kept: list[str] = []
+    fence: str | None = None
+    for line in text.split("\n"):
+        match = _FENCE_RE.match(line)
+        if fence is None:
+            if match:
+                fence = match.group(1)[0] * 3
+                continue
+            kept.append(line)
+        elif match and match.group(1).startswith(fence):
+            fence = None
+    return "\n".join(kept)
+
+
+def has_sections(text: str) -> bool:
+    """这一页有没有二级及以上标题 —— 也就是右栏有没有东西可铺。
+
+    只靠一个 h1 成不了目录：主题的 base.html 会把唯一的 h1 剥掉
+    （`{% set first = toc | first %}` 之后取 `first.children`），剩下的空目录
+    照样渲染成一个「目录」标签——看着有东西，点开只有它自己，却实打实
+    占掉右侧 242px。所以判据是「有没有 h2 及以下」，不是「有没有标题」。
+
+    标签页是例外判据的另一半：它的二级标题是**生成**出来的（每个标签一个），
+    源文件里只有一个占位符，所以看源文件看不出它有目录。
+    """
+    if TAG_MARKER in text:
+        return True
+    return _SECTION_RE.search(body_without_fences(text)) is not None
+
+
+def hide_sides(name: str, names: set[str], text: str) -> tuple[str, ...]:
+    """这一页要收掉哪几侧栏 —— `hide:` 里那串东西的唯一判据。
+
+    tools/i18n_check.py 复核派生语种时要重跑同一条流水线（它比对的正是产物
+    逐字节相等），所以判据只能有这一处：两边各写一遍，迟早会分叉，
+    而分叉的表现是构建红着、却看不出谁对。
+    """
+    sides: list[str] = []
+    if inert_sidebar(name, names):
+        sides.append("navigation")
+    # 右栏是这一页的目录。没有二级及以上标题就没有目录可铺——空栏一样占地方，
+    # 而且它在手机上只表现为一个点开是空的「目录」抽屉。
+    if not has_sections(text):
+        sides.append("toc")
+    return tuple(sides)
+
+
+def insert_hide(text: str, source: Path, sides: tuple[str, ...]) -> str:
+    """往生成物的前置元数据里加一行，收掉会空着的侧栏。
+
+    作者已经在源文件里写了 `hide:` 的，原样不动——那是有意为之，不是这里的推导。
+    """
+    if not sides:
+        return text
+    line = f"hide: [{', '.join(sides)}]"
+    if not has_front_matter(text):
+        # 没有前置元数据就加不了 hide:，这些侧栏会一直空着占地方。
+        # 不在这里抛错（模版允许无前置元数据的内容），但要说出来——
+        # 否则「栏怎么没藏」会变成一个找不着原因的现象。
+        print(f"warn: {source.relative_to(ROOT)} 没有 YAML 前置元数据，"
+              f"因此加不了 {line}（这些侧栏会是空的）", file=sys.stderr)
+        return text
+    end = text.find("\n---", 3)
+    if end == -1:
+        raise SystemExit(f"{source}: 前置元数据没有闭合")
+    front = text[:end]
+    if re.search(r"^hide\s*:", front, re.M):
+        return text
+    return f"{front}\n{line}{text[end:]}"
+
+
+# ── 认领与清理 ────────────────────────────────────────────────────────────
 
 def previously_generated() -> set[str]:
-    """上一次生成留下的产物：带生成横幅的 docs/**/*.md。
+    """上一次生成留下的产物：带生成横幅的 docs/**/*.md 与跳转桩。
 
     取代原先的 .docsgen.json 清单——那是在文件里已经写明「这是生成物」之外，
-    再单独存一份「哪些文件是生成物」，两份会分叉。手写的 docs/**/*.md 不带
-    横幅，因此不会被误认领、也不会被 prune 删掉。
+    再单独存一份「哪些文件是生成物」，两份会分叉。手写的 docs/**/*.md 与
+    手写的 docs/*.html 跳转桩都不带这个前缀，因此不会被误认领、也不会被
+    prune 删掉。
     """
     found: set[str] = set()
     for path in DOCS.rglob("*.md"):
         if OWNED_RE.search(path.read_text(encoding="utf-8")):
+            found.add(path.relative_to(ROOT).as_posix())
+    for path in DOCS.rglob("*.html"):
+        if STUB_OWNED_RE.search(path.read_text(encoding="utf-8")):
             found.add(path.relative_to(ROOT).as_posix())
     return found
 
@@ -185,19 +563,111 @@ def prune(previous: set[str], current: set[str]) -> list[Path]:
     return removed
 
 
+# ── 命名冲突 ──────────────────────────────────────────────────────────────
+
+def collisions() -> list[str]:
+    """版本 id 与当前版的顶层分区名撞车。
+
+    这一条只有在生成时才知道，所以不放进 versions.audit()：非当前版的产物落在
+    docs/<id>/，而当前版的分区也落在 docs/<分区名>/，两者同名就会把两棵完全
+    不同的树叠在一起——生成不报错，页面悄悄互相覆盖。
+    """
+    problems: list[str] = []
+    if not CONTENT.is_dir():
+        return problems
+
+    # 每个版本都必须有自己的首页。缺了它，下面补跳转桩时会生成
+    # docs/<版本>/index.html → 指向 "./"，也就是指向它自己，读者被卡在一个
+    # 无限自我跳转上；而 `index` 又正是唯一一个「桩的落点等于首页」的名字，
+    # 所以这里只能报错，不能靠补桩兜住。
+    for version in all_versions():
+        home = source_root(version) / f"index.{DEFAULT_LANG}.md"
+        if not home.exists():
+            where = "content/" if version.current else f"content/versions/{version.id}/"
+            # 隐式当前版（没声明任何版本）的 id 是空的，报「版本 “” 」没人看得懂。
+            whose = f"版本 “{version.id}”" if version.id else "当前版"
+            problems.append(
+                f"{whose}没有首页：{where}index.{DEFAULT_LANG}.md 不存在。"
+                f"每棵内容树都必须有自己的一篇首页，它也是版本切换器的落点"
+            )
+
+    top_dirs = {e.name for e in CONTENT.iterdir() if e.is_dir()}
+    top_pages = {split_lang(f.stem)[0] for f in CONTENT.glob("*.md") if split_lang(f.stem)}
+    for version in all_versions():
+        if version.current or not version.id:
+            continue
+        if version.id in top_dirs:
+            problems.append(
+                f"版本 id “{version.id}” 与 content/ 顶层的分区目录同名："
+                f"docs/{version.id}/ 会被两棵树同时写入"
+            )
+        if version.id in top_pages:
+            problems.append(
+                f"版本 id “{version.id}” 与 content/ 顶层的页面同名："
+                f"docs/{version.id} 既是目录又是页面"
+            )
+
+    # 还有一类撞车：**某一版根下有个页面，名字恰好是另一个版本的 id**。
+    #
+    # 页面在「别的版本」里缺页时要补一个跳转桩，桩落在**同一个相对地址**上
+    # （docs/<目标版本前缀>/<页面名>/index.html）。所以版本 `v1` 里那篇叫 `v1`
+    # 的页面，在每一棵别的版本树里都会生成一份 `docs/v1/index.html`——而那正是
+    # 版本 `v1` 自己的目录，和它的首页 docs/v1/index.md 抢同一个产物
+    # `site/v1/index.html`。
+    #
+    # 谁赢取决于构建顺序，两版还可能不一样：线上是首页赢，离线（use_directory_urls
+    # 关掉）是桩赢，于是彩蛋支的首页变成一页「本页无此版本」。这种「同一条路径两处
+    # 都要写」的事生成期就该拦下，不能靠运气。
+    archived_ids = {v.id for v in all_versions() if not v.current and v.id}
+    for version in all_versions():
+        root = source_root(version)
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*.md")):
+            name = split_lang(path.stem)[0]
+            if name and name in archived_ids:
+                where = "content/" if version.current else f"content/versions/{version.id}/"
+                problems.append(
+                    f"{where}{path.name} 的页名 “{name}” 与版本 id 撞车：它在别的版本里"
+                    f"缺页时，跳转桩会落到 docs/{name}/index.html，正好压住版本 “{name}”"
+                    f"自己的首页。给这一页换个名字（页面名改了，网址跟着改）"
+                )
+    return problems
+
+
+# ── 主流程 ────────────────────────────────────────────────────────────────
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="从 content/ 生成构建树 docs/")
     parser.add_argument("--check", action="store_true", help="只比对，不写盘")
     args = parser.parse_args()
 
+    problems = audit(DEFAULT_LANG, tuple(other_languages())) + collisions()
+    if problems:
+        for problem in problems:
+            print(f"error: {problem}", file=sys.stderr)
+        print("\n版本清单没对齐，先修好再生成。", file=sys.stderr)
+        return 1
+
     previous = previously_generated()
 
-    current: set[str] = set()
+    wanted: set[str] = set()
     changed: list[Path] = []
     errors: list[str] = []
 
-    def emit(target: Path, content: str) -> None:
-        current.add(target.relative_to(ROOT).as_posix())
+    #: 一次算好，别在 emit 里每页重扫一遍 content/
+    trees = tree_names()
+
+    def emit(target: Path, content: str, name: str | None = None,
+             version: Version | None = None, lang: str | None = None,
+             source: Source | None = None) -> None:
+        if name is not None and version is not None and lang is not None:
+            # 判据取自**源文件**：产物与源是同一份正文，而源文件在手边更直接。
+            sides = hide_sides(name, trees.get((version.id, lang), set()),
+                               source.path.read_text(encoding="utf-8")
+                               if source is not None else "")
+            content = insert_hide(content, target, sides)
+        wanted.add(target.relative_to(ROOT).as_posix())
         existing = target.read_text(encoding="utf-8") if target.exists() else None
         if existing == content:
             return
@@ -206,35 +676,80 @@ def main() -> int:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
 
+    entries = sources()
+    #: 标签页正文：按（版本，语言）算好，各语言各取自己那份。
+    tags_of = tag_index(entries)
     seen: dict[Path, Path] = {}
+    #: 每个页面名字对应的源文件，写进桩的注释里，方便回头查它是从哪儿补的。
+    stub_sources: dict[str, str] = {}
 
-    for source, name, lang in sources():
-        target = output_of(name, lang)
+    for source in entries:
+        target = output_of(source.name, source.lang, source.version)
         if target in seen:
-            errors.append(f"{source} 与 {seen[target]} 都要生成 {target}")
-        seen[target] = source
-        emit(target, render(source, lang, depth=depth_of(lang)))
+            errors.append(f"{source.path} 与 {seen[target]} 都要生成 {target}")
+        seen[target] = source.path
+        stub_sources.setdefault(source.name, source.path.relative_to(ROOT).as_posix())
+        emit(target, render(source, tags=tags_of.get((source.version.id, source.lang), "")),
+             source.name, source.version, source.lang, source=source)
 
         # 由这一族语言派生的其它语言（如 zh-hans → zh-hant）
         for dst_lang, src_lang, convert in DERIVATIONS:
-            if lang != src_lang:
+            if source.lang != src_lang:
                 continue
             note = " " + DERIVED_BANNER.format(source_lang=src_lang)
             emit(
-                output_of(name, dst_lang),
-                render(source, lang, depth=depth_of(dst_lang), convert=convert, note=note),
+                output_of(source.name, dst_lang, source.version),
+                render(source, out_lang=dst_lang, convert=convert, note=note,
+                       tags=tags_of.get((source.version.id, source.lang), "")),
+                source.name, source.version, dst_lang, source=source,
             )
 
-    stale = previous - current
+    # 每棵树（版本 × 语言）手里有哪些页面。派生语种跟着源语言一起记，
+    # 因为它确实会产出那一棵树的页面。
+    derived_of: dict[str, set[str]] = {}
+    for dst_lang, src_lang, _ in DERIVATIONS:
+        derived_of.setdefault(src_lang, set()).add(dst_lang)
+    have: dict[tuple[str, str], set[str]] = {}
+    for source in entries:
+        for lang in {source.lang} | derived_of.get(source.lang, set()):
+            have.setdefault((source.version.id, lang), set()).add(source.name)
+
+    every_name = sorted({name for names in have.values() for name in names})
+    languages = [DEFAULT_LANG, *other_languages()]
+
+    # 两条切换轴都出现在每一页上，所以只要「别处有、这里没有」，
+    # 就要在这里补一个桩，否则切换器会把读者送进 404：
+    #   * 版本轴 —— 当前版新加的分区，非当前版没有；
+    #   * 语言轴 —— 还没翻的篇目（含仍在补齐的语种）。
+    # 逐棵树补，判据是这一棵树自己有没有那一页，而不是整个版本有没有。
+    for version in all_versions():
+        for lang in languages:
+            names = have.get((version.id, lang), set())
+            has_home = "index" in names
+            base = DOCS / url_prefix(version) / lang_prefix(lang)
+            # `index` 是这棵树的首页：有就正常生成，没有就在这里补一个指向
+            # 「该版本默认语言首页」的桩。绝不能按普通页那样往自己身上跳。
+            if not has_home:
+                emit(base / "index.html",
+                     render_stub("index", lang, version,
+                                 f"版本 {version.id} 的首页", has_home))
+            for name in every_name:
+                if name == "index" or name in names:
+                    continue
+                emit(stub_of(name, lang, version),
+                     render_stub(name, lang, version,
+                                 stub_sources.get(name, name), has_home))
+
+    stale = previous - wanted
 
     if not args.check:
-        prune(previous, current)
+        prune(previous, wanted)
 
     for warning in errors:
         print(f"error: {warning}", file=sys.stderr)
 
     verb = "需要更新" if args.check else "已生成"
-    print(f"{verb} {len(changed)} / {len(current)} 个文件")
+    print(f"{verb} {len(changed)} / {len(wanted)} 个文件")
     for path in changed[:20]:
         print(f"  {path.relative_to(ROOT)}")
     if len(changed) > 20:

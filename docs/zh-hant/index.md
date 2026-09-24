@@ -4,6 +4,7 @@ icon: lucide/house
 description: 一個開箱即用的 Zensical 三語文檔站模版：content/ 是唯一手寫層，其餘全部由腳本生成。
 nav: ["guide", "reference", "about"]
 # ⚠️ 由 tools/docsgen.py 從 content/index.zh-hans.md 生成，請勿手改；要改請改 content/ 下的源文件。 （本頁由 zh-hans 版腳本轉換而來，不是另譯）
+hide: [navigation]
 ---
 
 # 三語文檔站模版

@@ -7,6 +7,7 @@ nav_label: "Home"
 icon: lucide/house
 nav: ["guide", "reference", "about"]
 # ⚠️ 由 tools/docsgen.py 从 content/index.en.md 生成，请勿手改；要改请改 content/ 下的源文件。
+hide: [navigation]
 ---
 
 # A Trilingual Docs Template

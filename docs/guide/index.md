@@ -5,6 +5,7 @@ icon: lucide/compass
 description: 从写第一篇内容到跑通全部体检。
 nav: ["getting-started", "writing", "translating"]
 # ⚠️ 由 tools/docsgen.py 从 content/guide/index.zh-hans.md 生成，请勿手改；要改请改 content/ 下的源文件。
+hide: [toc]
 ---
 
 # 指南
