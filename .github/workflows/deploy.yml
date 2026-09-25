@@ -61,6 +61,9 @@ jobs:
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 推之前先看构建到底产出东西没有：site/ 空着或没有首页时，
+          # 这一推会把线上分支清空——而「什么都没生成」正是最不该发出去的那一种。
+          test -f site/index.html || { echo "site/ 里没有 index.html，构建没产出东西"; exit 1; }
           cd site
           git init -q -b deploy
           git add -A -f
@@ -69,3 +72,4 @@ jobs:
               commit -qm "构建产物 · 源提交 ${GITHUB_SHA}"
           git push -q -f "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" deploy
           echo "已推送 deploy 分支：$(git rev-parse --short HEAD)"
+          echo "共 $(git ls-files | wc -l) 个文件、$(du -sh . | cut -f1)"
